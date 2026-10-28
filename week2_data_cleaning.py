@@ -1,89 +1,127 @@
-
 from pathlib import Path
 import pandas as pd
 
-# Load the dataset from the project folder
-input_file = Path("deliveries.csv")
-output_file = Path("deliveries_cleaned.csv")
+# Input and output files
+INPUT_FILE = Path("orders.xlsx")
+OUTPUT_FILE = Path("orders_cleaned.csv")
+REPORT_FILE = Path("data_quality_report.txt")
 
-if not input_file.exists():
+# Check that the Excel file exists
+if not INPUT_FILE.exists():
     raise FileNotFoundError(
-        "Please add your dataset as deliveries.csv "
-        "before running this script."
+        "Place orders.xlsx in the same folder as this script."
     )
 
-df = pd.read_csv(input_file)
+# Read all worksheets from the Excel workbook
+sheets = pd.read_excel(INPUT_FILE, sheet_name=None)
 
-print("Original dataset shape:", df.shape)
-print("\nColumn names:")
-print(df.columns.tolist())
+all_data = []
 
-print("\nMissing values:")
-print(df.isnull().sum())
+for sheet_name, sheet_df in sheets.items():
+    # Clean column-name spacing
+    sheet_df.columns = [
+        str(col).strip() for col in sheet_df.columns
+    ]
 
-# Remove exact duplicate rows
-before = len(df)
-df = df.drop_duplicates()
-print("\nExact duplicate rows removed:", before - len(df))
+    # Standardize time-window column name
+    sheet_df = sheet_df.rename(
+        columns={"TIME_WINDOW": "TIME WINDOW"}
+    )
 
-# Convert timestamp columns if they exist
-date_columns = [
-    "dispatch_time",
-    "promised_delivery_time",
-    "actual_delivery_time",
+    # Track the original worksheet
+    sheet_df["DAY"] = sheet_name
+    all_data.append(sheet_df)
+
+# Combine all worksheets
+df = pd.concat(all_data, ignore_index=True)
+
+# Initial data-quality checks
+initial_rows = len(df)
+missing_values = df.isnull().sum()
+duplicate_rows = int(df.duplicated().sum())
+
+# Remove exact duplicate records
+df = df.drop_duplicates().copy()
+
+# Convert selected columns to numeric where possible
+numeric_columns = [
+    "NODE_ID",
+    "WEIGHT",
+    "VOLUME",
+    "SERVICE_TIME",
+    "EAT",
+    "LAT"
 ]
 
-for column in date_columns:
-    if column in df.columns:
-        df[column] = pd.to_datetime(
-            df[column], errors="coerce"
+for col in numeric_columns:
+    if col in df.columns:
+        df[col] = pd.to_numeric(
+            df[col], errors="coerce"
         )
 
-# Convert numerical columns if they exist
-numeric_columns = ["distance_km", "parcel_weight_kg"]
+# Flag negative values for investigation
+negative_counts = {}
 
-for column in numeric_columns:
-    if column in df.columns:
-        df[column] = pd.to_numeric(
-            df[column], errors="coerce"
+for col in ["WEIGHT", "VOLUME", "SERVICE_TIME"]:
+    if col in df.columns:
+        negative_counts[col] = int(
+            (df[col] < 0).sum()
         )
-        df.loc[df[column] < 0, column] = float("nan")
 
-# Calculate actual delivery duration when possible
-if {"dispatch_time", "actual_delivery_time"}.issubset(df.columns):
-    df["delivery_duration_hours"] = (
-        df["actual_delivery_time"] - df["dispatch_time"]
-    ).dt.total_seconds() / 3600
+# Identify potential outliers using IQR
+outlier_counts = {}
 
-    df.loc[
-        df["delivery_duration_hours"] < 0,
-        "delivery_duration_hours"
-    ] = float("nan")
+for col in ["WEIGHT", "VOLUME", "SERVICE_TIME"]:
+    if col not in df.columns:
+        continue
 
-# Report potential IQR outliers; do not remove automatically
-report_lines = [
-    f"Rows after exact duplicate removal: {len(df)}",
-    f"Columns: {len(df.columns)}",
-    "\nMissing values:\n" + df.isnull().sum().to_string(),
-    "\nPotential IQR outliers:",
-]
+    values = df[col].dropna()
 
-for column in df.select_dtypes(include="number").columns:
-    values = df[column].dropna()
     if values.empty:
         continue
 
     q1 = values.quantile(0.25)
     q3 = values.quantile(0.75)
     iqr = q3 - q1
-    outliers = ((values < q1 - 1.5 * iqr) |
-                (values > q3 + 1.5 * iqr)).sum()
 
-    report_lines.append(f"{column}: {outliers}")
+    lower = q1 - 1.5 * iqr
+    upper = q3 + 1.5 * iqr
 
-df.to_csv(output_file, index=False)
-Path("data_quality_report.txt").write_text(
-    "\n".join(report_lines), encoding="utf-8"
+    outlier_counts[col] = int(
+        ((values < lower) | (values > upper)).sum()
+    )
+
+# Save cleaned dataset
+df.to_csv(OUTPUT_FILE, index=False)
+
+# Generate data-quality report
+report = [
+    "LOGISTICS DATA QUALITY REPORT",
+    f"Worksheets processed: {len(sheets)}",
+    f"Rows before duplicate removal: {initial_rows}",
+    f"Duplicate rows removed: {duplicate_rows}",
+    f"Rows after cleaning: {len(df)}",
+    f"Columns: {df.columns.tolist()}",
+    "",
+    "Missing values before cleaning:",
+    missing_values.to_string(),
+    "",
+    "Negative-value counts:",
+    str(negative_counts),
+    "",
+    "Potential IQR outliers:",
+    str(outlier_counts),
+]
+
+REPORT_FILE.write_text(
+    "\n".join(report),
+    encoding="utf-8"
+)
+
+print("\n".join(report))
+print(f"\nSaved: {OUTPUT_FILE}")
+print(f"Saved: {REPORT_FILE}")
+
 )
 
 print("\nSaved:", output_file)
